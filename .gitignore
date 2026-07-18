@@ -1,0 +1,14 @@
+# Build artifacts
+build/
+dist/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local environment
+venv/
+.venv/
+
+# Editor
+.vscode/
+.idea/
