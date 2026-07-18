@@ -1,5 +1,5 @@
 # AudioBook Manager
-
+(Warning: Vibe Coded)
 A Windows desktop app for wrangling a messy audiobook collection into a clean,
 tagged, consistently-organized library. Built with PyQt6 + mutagen.
 
