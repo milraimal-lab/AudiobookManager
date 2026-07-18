@@ -1,0 +1,7 @@
+PyQt6>=6.6
+mutagen>=1.47
+requests>=2.31
+
+# Development / build
+# pytest>=8.0
+# pyinstaller>=6.0
