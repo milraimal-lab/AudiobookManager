@@ -49,6 +49,11 @@ class MainWindow(QMainWindow):
         self._save_thread:  Optional[SaveThread]     = None
         self._org_thread:   Optional[OrganizeThread] = None
         self._m4b_thread:   Optional[QThread]        = None
+        self._m4b_queue:    list                     = []   # [(book, out_path)]
+        self._m4b_current:  Optional[tuple]          = None
+        self._m4b_results:  list                     = []
+        self._m4b_total:    int                      = 0
+        self._m4b_label:    str                      = ''
         self._hydrate_threads: list = []
         self._dup_thread:   Optional[QThread]        = None
         self._author_scan_thread: Optional[ScanThread] = None
@@ -933,8 +938,13 @@ class MainWindow(QMainWindow):
         self._set_status(
             f"Auto-split into {len(groups)} books ✓ — check them, then Save All Tags.")
 
-    def _build_m4b(self, book: Optional[sc.Book]):
-        if not book or not book.files:
+    def _build_m4b(self, books):
+        """Queue one or more books for M4B conversion. Builds run strictly
+        one at a time so the progress bar tracks a single job."""
+        if isinstance(books, sc.Book) or books is None:
+            books = [books] if books else []
+        books = [b for b in books if b and b.files]
+        if not books:
             QMessageBox.information(self, "Build M4B", "Select a book with files first.")
             return
         ffmpeg = find_ffmpeg()
@@ -944,26 +954,79 @@ class MainWindow(QMainWindow):
                 "Either place ffmpeg.exe next to this app, or install it with:\n"
                 "winget install ffmpeg\nthen restart this app.")
             return
-        default_name = org.sanitize(book.title or book.display_name) + ".m4b"
-        default_path = str(book.files[0].path.parent / default_name)
-        out, _ = QFileDialog.getSaveFileName(self, "Save M4B As", default_path,
-                                             "M4B Audiobook (*.m4b)")
-        if not out: return
-        out_path = Path(out)
-        if out_path in [af.path for af in book.files]:
-            QMessageBox.warning(self, "Invalid Output",
-                "The output file can't overwrite one of the source files.")
-            return
-        self.prog_bar.setRange(0, 100); self.prog_bar.setVisible(True)
-        self._m4b_thread = M4bThread(book, out_path, ffmpeg)
-        self._m4b_thread.progress.connect(self._on_save_progress)
-        self._m4b_thread.finished.connect(lambda p, b=book: self._on_m4b_done(b, p))
-        self._m4b_thread.error.connect(self._on_error)
-        self._m4b_thread.start()
-        self._set_status(f"Building {out_path.name}…")
 
-    def _on_m4b_done(self, book: sc.Book, out_path: str):
-        self.prog_bar.setVisible(False)
+        jobs = []
+        if len(books) == 1:
+            book = books[0]
+            default_name = org.sanitize(book.title or book.display_name) + ".m4b"
+            default_path = str(book.files[0].path.parent / default_name)
+            out, _ = QFileDialog.getSaveFileName(self, "Save M4B As", default_path,
+                                                 "M4B Audiobook (*.m4b)")
+            if not out: return
+            jobs.append((book, Path(out)))
+        else:
+            # One folder choice for the batch instead of N save dialogs
+            start = str(books[0].files[0].path.parent)
+            folder = QFileDialog.getExistingDirectory(
+                self, f"Choose output folder for {len(books)} M4B files", start)
+            if not folder: return
+            for b in books:
+                name = org.sanitize(b.title or b.display_name) + ".m4b"
+                jobs.append((b, Path(folder) / name))
+
+        # Never let an output clobber one of its own sources
+        safe, bad = [], []
+        for book, out_path in jobs:
+            if out_path in [af.path for af in book.files]:
+                bad.append(book.display_name)
+            else:
+                safe.append((book, out_path))
+        if bad:
+            QMessageBox.warning(self, "Skipping Some Books",
+                "These would overwrite their own source file and were skipped:\n"
+                + "\n".join(f"  • {n}" for n in bad[:8]))
+        if not safe: return
+
+        if self._m4b_queue or (self._m4b_thread and self._m4b_thread.isRunning()):
+            self._m4b_queue.extend(safe)
+            self._m4b_total += len(safe)
+            self._set_status(f"Queued {len(safe)} more M4B build(s) "
+                             f"— {len(self._m4b_queue)} waiting.")
+            return
+
+        self._m4b_queue = list(safe)
+        self._m4b_total = len(safe)
+        self._m4b_results = []
+        self._start_next_m4b()
+
+    def _start_next_m4b(self):
+        if not self._m4b_queue:
+            self._finish_m4b_batch()
+            return
+        # Let the previous job's thread fully terminate before we drop our
+        # reference to it — a running QThread that gets GC'd crashes Qt
+        if self._m4b_thread is not None:
+            self._m4b_thread.wait(5000)
+        book, out_path = self._m4b_queue.pop(0)
+        self._m4b_current = (book, out_path)
+        idx = self._m4b_total - len(self._m4b_queue)
+        self._m4b_label = (f"[{idx}/{self._m4b_total}] " if self._m4b_total > 1 else "")
+        self.prog_bar.setRange(0, 100); self.prog_bar.setValue(0)
+        self.prog_bar.setVisible(True)
+        self._m4b_thread = M4bThread(book, out_path, find_ffmpeg())
+        self._m4b_thread.progress.connect(self._on_m4b_progress)
+        self._m4b_thread.finished.connect(self._on_m4b_done)
+        self._m4b_thread.error.connect(self._on_m4b_error)
+        self._m4b_thread.start()
+        self._set_status(f"{self._m4b_label}Building {out_path.name}…")
+
+    def _on_m4b_progress(self, cur, tot, msg):
+        if tot > 0:
+            self.prog_bar.setRange(0, tot); self.prog_bar.setValue(cur)
+        self._set_status(f"{self._m4b_label}{msg}")
+
+    def _on_m4b_done(self, out_path: str):
+        book, _ = self._m4b_current
         # Tag the new file with the book's metadata + cover
         try:
             tg.write_tags(Path(out_path), dict(
@@ -974,13 +1037,47 @@ class MainWindow(QMainWindow):
                 year=book.year, publisher=book.publisher,
                 genre=book.genre, comment=book.description,
                 description=book.description, cover_art=book.cover_art))
+            note = ''
         except Exception as e:
-            self._set_status(f"M4B built, but tagging failed: {e}")
-        QMessageBox.information(self, "M4B Built",
-            f"Created:\n{out_path}\n\n"
-            f"{book.file_count} file(s) became chapters. "
-            "Original files are untouched.\nRescan (F5) to see it in the tree.")
-        self._set_status(f"Built {Path(out_path).name} ✓")
+            note = f"  (tagging failed: {e})"
+        log_line(f"[m4b] built {out_path} from {book.file_count} file(s){note}")
+        self._m4b_results.append((True, book.display_name, out_path + note))
+        self._start_next_m4b()
+
+    def _on_m4b_error(self, msg: str):
+        book, out_path = self._m4b_current
+        log_line(f"[m4b] FAILED {out_path}: {msg}")
+        self._m4b_results.append((False, book.display_name, msg))
+        self._start_next_m4b()   # one failure shouldn't stall the queue
+
+    def _finish_m4b_batch(self):
+        if self._m4b_thread is not None:
+            self._m4b_thread.wait(5000)
+            self._m4b_thread = None
+        self._m4b_current = None
+        self.prog_bar.setVisible(False)
+        results, self._m4b_results = self._m4b_results, []
+        self._m4b_total = 0
+        if not results: return
+        ok = [r for r in results if r[0]]
+        bad = [r for r in results if not r[0]]
+        if len(results) == 1 and ok:
+            QMessageBox.information(self, "M4B Built",
+                f"Created:\n{ok[0][2]}\n\n"
+                "Each source file became a chapter. Originals are untouched.\n"
+                "Rescan (F5) to see it in the tree.")
+        else:
+            lines = [f"✔ {name}" for _, name, _ in ok[:12]]
+            if bad:
+                lines.append("")
+                lines += [f"✖ {name} — {err}" for _, name, err in bad[:8]]
+            QMessageBox.information(self, "M4B Batch Finished",
+                f"Built {len(ok)} of {len(results)} M4B file(s).\n\n"
+                + "\n".join(lines)
+                + "\n\nOriginals are untouched. Rescan (F5) to see them.")
+        self._set_status(
+            f"M4B batch finished — {len(ok)} built"
+            + (f", {len(bad)} failed" if bad else "") + " ✓")
 
     def _delete_empty_folders(self):
         roots = []

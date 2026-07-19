@@ -1,7 +1,7 @@
 """App-wide constants: version, theme, colors, MIME types, search columns."""
 
 APP_NAME    = "AudioBook Manager"
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 
 STYLE = """
 QMainWindow,QWidget           { background:#1e1e2e; color:#cdd6f4; }

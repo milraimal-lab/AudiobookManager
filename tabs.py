@@ -731,7 +731,7 @@ class FilesTab(QWidget):
     status_message      = pyqtSignal(str)
     merge_requested     = pyqtSignal(list)             # list[sc.Book] to merge
     ops_performed       = pyqtSignal(str, list, bool)  # desc, pairs, is_copy
-    build_m4b_requested = pyqtSignal(object)           # sc.Book
+    build_m4b_requested = pyqtSignal(object)           # list[sc.Book]
     split_requested     = pyqtSignal(list)             # [(book, file_idx), …]
     autosplit_requested = pyqtSignal(object)           # sc.Book → split by album tag
 
@@ -774,11 +774,11 @@ class FilesTab(QWidget):
         hdr.addWidget(self._split_btn)
         self._m4b_btn = QPushButton("Build M4B…")
         self._m4b_btn.setToolTip(
-            "Combine this book's files into a single .m4b with chapters.\n"
-            "Each file becomes one chapter. Requires ffmpeg on PATH.\n"
-            "Originals are untouched.")
+            "Combine each selected book's files into a single .m4b with chapters.\n"
+            "Each file becomes one chapter. Builds run one at a time.\n"
+            "Requires ffmpeg. Originals are untouched.")
         self._m4b_btn.clicked.connect(
-            lambda: self.build_m4b_requested.emit(self.book))
+            lambda: self.build_m4b_requested.emit(self._displayed_books()))
         hdr.addWidget(self._m4b_btn)
         for lbl2, tip, slot in [
                 ("↑ Up",   "", self._move_up),
@@ -854,6 +854,7 @@ class FilesTab(QWidget):
         self._merge_btn.setText(f"🔗 Merge {n} Selected Books" if n >= 2
                                 else "🔗 Merge Selected Books")
         self._rename_btn.setText(f"Apply Rename to {n} Books" if n > 1 else "Apply Rename")
+        self._m4b_btn.setText(f"Build {n} M4Bs…" if n > 1 else "Build M4B…")
         self.refresh()
 
     def _displayed_books(self) -> List[sc.Book]:
