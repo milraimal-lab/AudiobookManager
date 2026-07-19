@@ -14,9 +14,10 @@ from PyQt6.QtWidgets import (
     QDialog, QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar,
     QStatusBar, QFrame, QCheckBox, QMenu, QAbstractItemView,
     QToolBar, QTreeWidget, QTreeWidgetItem, QSizePolicy, QTabWidget,
-    QComboBox, QSpinBox, QGridLayout, QInputDialog,
+    QComboBox, QSpinBox, QGridLayout, QInputDialog, QCompleter,
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QMimeData, QByteArray, QPoint, QTimer
+from PyQt6.QtCore import (Qt, QThread, pyqtSignal, QSize, QMimeData, QByteArray,
+                          QPoint, QTimer, QStringListModel)
 from PyQt6.QtGui  import QPixmap, QAction, QColor, QDrag, QFont, QCursor, QPainter, QPen
 
 import scanner as sc
@@ -70,11 +71,15 @@ class EditMetadataTab(QWidget):
     _CSS_COVER_NORMAL  = f"border:1px solid #313244; border-radius:4px; color:{GRAY};"
     _CSS_COVER_PENDING = f"border:2px solid {YELLOW}; border-radius:4px;"
 
+    # Fields that autocomplete from values already in the library
+    COMPLETER_FIELDS = ('author', 'narrator', 'series', 'publisher', 'genre')
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._books: List[sc.Book] = []
         self._busy = False
         self._field_edits: dict = {}   # key → QLineEdit
+        self._completers: dict = {}    # key → (QCompleter, QStringListModel)
         self._extra_edits: list = []   # [(key, original_value, QLineEdit)]
         self._pending_cover: Optional[bytes] = None
         self.all_books_provider = None   # callable → all books (library + import)
@@ -84,6 +89,7 @@ class EditMetadataTab(QWidget):
 
     def set_books(self, books: List[sc.Book]):
         self._books = books
+        self._refresh_completers()
         if books:
             self._load_from_book(books[0])
         else:
@@ -100,6 +106,21 @@ class EditMetadataTab(QWidget):
                 "use a field's Apply button to change just that field.")
         self._save_btn.setText(f"Save to {n} Book(s)" if n else "Save to Selected Books")
         self._update_cover_info()
+
+    def _refresh_completers(self):
+        """Feed each autocomplete field the distinct values already used across
+        the whole collection (library + import)."""
+        if not self._completers or not self.all_books_provider:
+            return
+        all_books = self.all_books_provider() or []
+        values: dict = {k: set() for k in self.COMPLETER_FIELDS}
+        for b in all_books:
+            for key in self.COMPLETER_FIELDS:
+                v = (getattr(b, key, '') or '').strip()
+                if v:
+                    values[key].add(v)
+        for key, (comp, model) in self._completers.items():
+            model.setStringList(sorted(values[key], key=str.casefold))
 
     def _update_cover_info(self):
         covers = {c for b in self._books for af in b.files
@@ -184,6 +205,16 @@ class EditMetadataTab(QWidget):
 
             edit = QLineEdit(); self._field_edits[key] = edit
             if tip: edit.setToolTip(tip)
+            if key in self.COMPLETER_FIELDS:
+                model = QStringListModel(self)
+                comp = QCompleter(model, self)
+                comp.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+                # MatchContains → "sanderson" matches "Brandon Sanderson"
+                comp.setFilterMode(Qt.MatchFlag.MatchContains)
+                comp.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+                comp.setMaxVisibleItems(12)
+                edit.setCompleter(comp)
+                self._completers[key] = (comp, model)
             grid.addWidget(edit, row, 1)
 
             picker_btn = QPushButton("▾")
