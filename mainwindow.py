@@ -27,7 +27,7 @@ import organizer as org
 
 from constants import *
 from util import (_load_settings, _save_settings, log_line, LOG_PATH,
-                  send_to_recycle_bin, find_ffmpeg)
+                  send_to_recycle_bin, find_ffmpeg, fmt_size, fmt_duration)
 from workers import (ScanThread, HydrateThread, SaveThread, DupCheckThread,
                      OrganizeThread, M4bThread)
 from booktree import BookTreeWidget, _book_misplacement
@@ -383,9 +383,13 @@ class MainWindow(QMainWindow):
 
     def _on_dup_check_done(self, results: list):
         self._set_status("Duplicate check finished.")
-        for verdict, a, b in results:
-            log_line(f"[dupcheck] {verdict} | '{a.display_name}' | "
-                     f"{a.files[0].path.parent} | {b.files[0].path.parent}")
+        for verdict, a, b, sa, sb in results:
+            log_line(
+                f"[dupcheck] {verdict} | '{a.display_name}' | "
+                f"A: {a.files[0].path.parent} "
+                f"({fmt_size(sa['bytes'])}, {fmt_duration(sa['seconds'])}) | "
+                f"B: {b.files[0].path.parent} "
+                f"({fmt_size(sb['bytes'])}, {fmt_duration(sb['seconds'])})")
         if not results:
             QMessageBox.information(self, "Duplicate Check",
                 "No same author+title pairs found.")

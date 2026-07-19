@@ -26,7 +26,7 @@ import audible as au
 import organizer as org
 
 from constants import *
-from util import _suggest_fix, find_ffmpeg, log_line
+from util import _suggest_fix, find_ffmpeg, log_line, fmt_size, fmt_duration
 from workers import SearchThread, CoverFetchThread, RepairThread
 
 class _ClickableLabel(QLabel):
@@ -470,17 +470,20 @@ class ProblemsDialog(QDialog):
 class DupResultsDialog(QDialog):
     """Duplicate-check results with per-copy delete buttons."""
     def __init__(self, results: list, delete_cb, parent=None):
-        # results: [(verdict, book_a, book_b)] — delete_cb(list[Book]) -> bool
+        # results: [(verdict, book_a, book_b, stats_a, stats_b)]
+        # delete_cb(list[Book]) -> bool
         super().__init__(parent)
         self._delete_cb = delete_cb
         self.setWindowTitle("Duplicate Check Results")
-        self.setMinimumSize(1180, 480)
+        self.setMinimumSize(1180, 520)
         lay = QVBoxLayout(self)
 
-        tip = QLabel("Double-click a Copy A / Copy B path to open it in Explorer.  "
-                     "The Delete buttons move that copy's files straight to the "
-                     "Recycle Bin — no confirmation popup, restore from the Bin "
-                     "if you change your mind.")
+        tip = QLabel("Each copy shows its total size, runtime and file count — a "
+                     "shorter runtime usually means an abridged or truncated copy, "
+                     "and the standout value is highlighted green.  Double-click a "
+                     "path to open it in Explorer.  Delete moves that copy straight "
+                     "to the Recycle Bin — no confirmation, restore from the Bin if "
+                     "you change your mind.")
         tip.setStyleSheet(f"color:{GRAY}; font-size:11px;")
         tip.setWordWrap(True)
         lay.addWidget(tip)
@@ -490,29 +493,46 @@ class DupResultsDialog(QDialog):
         hh = self.tbl.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hh.setStretchLastSection(False)
-        for col, wpx in enumerate([220, 230, 280, 280, 175]):
+        for col, wpx in enumerate([210, 210, 300, 300, 175]):
             self.tbl.setColumnWidth(col, wpx)
         self.tbl.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tbl.setWordWrap(True)
         self.tbl.verticalHeader().setVisible(False)
         self.tbl.cellDoubleClicked.connect(self._open_in_explorer)
         self._row_paths: list = []   # row → (folder_a, folder_b)
 
-        for r, (verdict, a, b) in enumerate(results):
+        for r, (verdict, a, b, sa, sb) in enumerate(results):
             vi = QTableWidgetItem(verdict)
             vi.setForeground(QColor(RED if 'EXACT' in verdict else YELLOW))
             vi.setToolTip(verdict)
             self.tbl.setItem(r, 0, vi)
             bi = QTableWidgetItem(f"{a.display_name} — {a.author or 'Unknown'}")
             self.tbl.setItem(r, 1, bi)
-            folder_a = a.files[0].path.parent
-            folder_b = b.files[0].path.parent
-            pa = QTableWidgetItem(str(folder_a))
-            pa.setToolTip(f"{folder_a}\n(double-click to open in Explorer)")
-            self.tbl.setItem(r, 2, pa)
-            pb = QTableWidgetItem(str(folder_b))
-            pb.setToolTip(f"{folder_b}\n(double-click to open in Explorer)")
-            self.tbl.setItem(r, 3, pb)
-            self._row_paths.append((folder_a, folder_b))
+
+            # Flag the standout copy: a longer runtime beats a bigger file,
+            # since a short one is usually abridged or incomplete
+            longer = larger = None
+            if abs(sa['seconds'] - sb['seconds']) > 60:
+                longer = 'a' if sa['seconds'] > sb['seconds'] else 'b'
+            elif sa['bytes'] and sb['bytes']:
+                if abs(sa['bytes'] - sb['bytes']) / max(sa['bytes'], sb['bytes']) > 0.01:
+                    larger = 'a' if sa['bytes'] > sb['bytes'] else 'b'
+
+            folders = []
+            for col, (book, st, side) in enumerate(
+                    ((a, sa, 'a'), (b, sb, 'b')), start=2):
+                folder = book.files[0].path.parent
+                folders.append(folder)
+                note = ('   ◀ longer' if longer == side else
+                        '   ◀ larger' if larger == side else '')
+                stats = (f"{fmt_size(st['bytes'])}  ·  {fmt_duration(st['seconds'])}"
+                         f"  ·  {st['files']} file(s){note}")
+                item = QTableWidgetItem(f"{stats}\n{folder}")
+                if note:
+                    item.setForeground(QColor(GREEN))
+                item.setToolTip(f"{stats}\n{folder}\n(double-click to open in Explorer)")
+                self.tbl.setItem(r, col, item)
+            self._row_paths.append(tuple(folders))
 
             w = QWidget(); wl = QHBoxLayout(w)
             wl.setContentsMargins(2, 0, 2, 0); wl.setSpacing(4)
@@ -523,6 +543,8 @@ class DupResultsDialog(QDialog):
                     lambda checked=False, bk=book, row=r: self._delete(bk, row))
                 wl.addWidget(btn)
             self.tbl.setCellWidget(r, 4, w)
+
+        self.tbl.resizeRowsToContents()
         lay.addWidget(self.tbl)
 
         br = QHBoxLayout(); br.addStretch()

@@ -1,5 +1,7 @@
-"""Pure helpers: title parsing, filename sanitizing, ffmetadata escaping."""
-from util import parse_audiobook_title, _sanitize, _ffesc
+"""Pure helpers: title parsing, filename sanitizing, ffmetadata escaping,
+human-readable size/duration formatting."""
+from util import (parse_audiobook_title, _sanitize, _ffesc,
+                  fmt_size, fmt_duration)
 
 
 def test_parse_paren_series_hash():
@@ -36,3 +38,26 @@ def test_ffesc_escapes_metadata_specials():
 
 def test_ffesc_none_is_empty():
     assert _ffesc(None) == ''
+
+
+def test_fmt_size_scales_units():
+    assert fmt_size(512) == '512 B'
+    assert fmt_size(2048) == '2 KB'
+    assert fmt_size(5 * 1024 ** 2) == '5 MB'
+    assert fmt_size(int(1.5 * 1024 ** 3)) == '1.50 GB'
+
+def test_fmt_size_handles_zero_and_none():
+    assert fmt_size(0) == '0 B'
+    assert fmt_size(None) == '0 B'
+
+
+def test_fmt_duration_hours_and_minutes():
+    assert fmt_duration(3600) == '1h 00m'
+    assert fmt_duration(3600 * 24 + 600) == '24h 10m'
+
+def test_fmt_duration_minutes_only():
+    assert fmt_duration(47 * 60) == '47m'
+
+def test_fmt_duration_unknown():
+    assert fmt_duration(0) == '--'
+    assert fmt_duration(None) == '--'

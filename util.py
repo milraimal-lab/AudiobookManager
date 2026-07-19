@@ -7,6 +7,27 @@ import re
 import shutil
 import sys
 
+def fmt_size(num_bytes) -> str:
+    """Human-readable byte count: 734 MB, 1.24 GB …"""
+    n = float(num_bytes or 0)
+    for unit in ('B', 'KB', 'MB'):
+        if n < 1024:
+            return f"{n:.0f} {unit}"
+        n /= 1024
+    if n < 1024:
+        return f"{n:.2f} GB"
+    return f"{n / 1024:.2f} TB"
+
+
+def fmt_duration(seconds) -> str:
+    """Human-readable runtime: 12h 04m, 47m, or -- when unknown."""
+    s = int(seconds or 0)
+    if s <= 0:
+        return '--'
+    h, m = s // 3600, (s % 3600) // 60
+    return f"{h}h {m:02d}m" if h else f"{m}m"
+
+
 SETTINGS_PATH = Path.home() / '.audiobookmanagerv2.json'
 
 def _load_settings() -> dict:

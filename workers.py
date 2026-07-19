@@ -103,7 +103,7 @@ class SaveThread(QThread):
 class DupCheckThread(QThread):
     """Compare books that share a title: file count → sizes → MD5 hashes."""
     progress = pyqtSignal(str)
-    finished = pyqtSignal(list)   # report lines
+    finished = pyqtSignal(list)   # [(verdict, book_a, book_b, stats_a, stats_b)]
 
     def __init__(self, books):
         super().__init__(); self.books = books; self._stop = False
@@ -127,8 +127,29 @@ class DupCheckThread(QThread):
                     if self._stop: return
                     a, c = bs[i], bs[j]
                     self.progress.emit(f"Comparing '{a.display_name}'…")
-                    report.append((self._compare(a, c), a, c))
+                    verdict = self._compare(a, c)
+                    report.append((verdict, a, c,
+                                   self._book_stats(a), self._book_stats(c)))
         self.finished.emit(report)
+
+    def _book_stats(self, book) -> dict:
+        """Total bytes + runtime for a book. Files skipped by a fast scan are
+        hydrated here so the duration is real rather than zero."""
+        total_bytes = 0
+        for af in book.files:
+            try:
+                total_bytes += af.path.stat().st_size
+            except OSError:
+                pass
+            if not af.hydrated:
+                t = tg.read_tags(af.path)
+                t.pop('_error', None)
+                af.tags = t
+                af.duration = float(t.get('duration', 0) or 0)
+                af.hydrated = True
+        return {'bytes':   total_bytes,
+                'seconds': sum(af.duration for af in book.files),
+                'files':   book.file_count}
 
     def _compare(self, a, b) -> str:
         if a.file_count != b.file_count:
