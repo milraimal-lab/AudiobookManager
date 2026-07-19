@@ -14,7 +14,7 @@ pytestmark = pytest.mark.skipif(FFMPEG is None, reason="ffmpeg not found")
 
 
 def _gen(path, seconds='0.3', freq='440'):
-    """Write a tiny real audio file (mp3 or m4b) at *path*."""
+    """Write a tiny real audio file (mp3, m4b, or flac) at *path*."""
     codec = ['-c:a', 'aac', '-f', 'ipod'] if path.suffix == '.m4b' else []
     subprocess.run(
         [FFMPEG, '-y', '-f', 'lavfi', '-i', f'sine=frequency={freq}:sample_rate=22050',
@@ -39,6 +39,14 @@ def mp3(base_mp3, tmp_path):
 def m4b(base_m4b, tmp_path):
     return shutil.copy2(base_m4b, tmp_path / 'test.m4b')
 
+@pytest.fixture(scope='session')
+def base_flac(tmp_path_factory):
+    return _gen(tmp_path_factory.mktemp('audio') / 'base.flac')
+
+@pytest.fixture
+def flac(base_flac, tmp_path):
+    return shutil.copy2(base_flac, tmp_path / 'test.flac')
+
 
 # ── round trips ──────────────────────────────────────────────────
 
@@ -61,6 +69,24 @@ def test_m4b_round_trip(m4b):
     for key in ('title', 'author', 'narrator', 'series', 'series_num',
                 'year', 'publisher'):
         assert got[key] == FIELDS[key], key
+
+def test_flac_round_trip(flac):
+    tg.write_tags(flac, dict(FIELDS))
+    got = tg.read_tags(flac)
+    for key in ('title', 'author', 'narrator', 'series', 'series_num',
+                'year', 'publisher', 'genre'):
+        assert got[key] == FIELDS[key], key
+
+def test_flac_delete_field(flac):
+    tg.write_tags(flac, dict(FIELDS))
+    assert tg.delete_field(flac, 'series_num')
+    assert tg.read_tags(flac).get('series_num', '') == ''
+
+def test_flac_audio_hash_ignores_tags(flac, tmp_path):
+    twin = shutil.copy2(flac, tmp_path / 'twin.flac')
+    tg.write_tags(twin, {'title': 'Different', 'author': 'Different',
+                         'series_num': '99'})
+    assert tg.audio_content_md5(flac) == tg.audio_content_md5(twin)
 
 def test_partial_write_touches_only_that_field(mp3):
     tg.write_tags(mp3, dict(FIELDS))
