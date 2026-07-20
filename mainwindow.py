@@ -48,12 +48,13 @@ class MainWindow(QMainWindow):
         self._import_scan_thread: Optional[ScanThread] = None
         self._save_thread:  Optional[SaveThread]     = None
         self._org_thread:   Optional[OrganizeThread] = None
-        self._m4b_thread:   Optional[QThread]        = None
-        self._m4b_queue:    list                     = []   # [(book, out_path)]
-        self._m4b_current:  Optional[tuple]          = None
+        self._m4b_threads:  dict                     = {}   # M4bThread -> (book, out_path)
+        self._m4b_frac:     dict                     = {}   # M4bThread -> float 0..1 progress
+        self._m4b_msg:      dict                     = {}   # M4bThread -> latest status text
+        self._m4b_queue:    list                     = []   # [(book, out_path)] pending
         self._m4b_results:  list                     = []
         self._m4b_total:    int                      = 0
-        self._m4b_label:    str                      = ''
+        self._m4b_done:     int                      = 0    # finished (ok or failed)
         self._hydrate_threads: list = []
         self._dup_thread:   Optional[QThread]        = None
         self._author_scan_thread: Optional[ScanThread] = None
@@ -939,8 +940,8 @@ class MainWindow(QMainWindow):
             f"Auto-split into {len(groups)} books ✓ — check them, then Save All Tags.")
 
     def _build_m4b(self, books):
-        """Queue one or more books for M4B conversion. Builds run strictly
-        one at a time so the progress bar tracks a single job."""
+        """Queue one or more books for M4B conversion. Up to M4B_MAX_PARALLEL
+        builds run at once; the progress bar tracks the batch as a whole."""
         if isinstance(books, sc.Book) or books is None:
             books = [books] if books else []
         books = [b for b in books if b and b.files]
@@ -987,77 +988,142 @@ class MainWindow(QMainWindow):
                 + "\n".join(f"  • {n}" for n in bad[:8]))
         if not safe: return
 
-        if self._m4b_queue or (self._m4b_thread and self._m4b_thread.isRunning()):
+        # Every job must target a distinct output path: parallel builds writing
+        # the same file at once would corrupt it. Dedupe against jobs already in
+        # flight / queued and within this batch, suffixing " (2)", " (3)"…
+        busy = {op for (_, op) in self._m4b_threads.values()}
+        busy |= {op for (_, op) in self._m4b_queue}
+        deduped = []
+        for book, out_path in safe:
+            out_path = self._unique_m4b_path(out_path, busy)
+            busy.add(out_path)
+            deduped.append((book, out_path))
+        safe = deduped
+
+        if self._m4b_threads or self._m4b_queue:
+            # A batch is already running — append and top up to the parallel cap.
             self._m4b_queue.extend(safe)
             self._m4b_total += len(safe)
             self._set_status(f"Queued {len(safe)} more M4B build(s) "
                              f"— {len(self._m4b_queue)} waiting.")
+            self._pump_m4b()
             return
 
         self._m4b_queue = list(safe)
         self._m4b_total = len(safe)
+        self._m4b_done  = 0
         self._m4b_results = []
-        self._start_next_m4b()
-
-    def _start_next_m4b(self):
-        if not self._m4b_queue:
-            self._finish_m4b_batch()
-            return
-        # Let the previous job's thread fully terminate before we drop our
-        # reference to it — a running QThread that gets GC'd crashes Qt
-        if self._m4b_thread is not None:
-            self._m4b_thread.wait(5000)
-        book, out_path = self._m4b_queue.pop(0)
-        self._m4b_current = (book, out_path)
-        idx = self._m4b_total - len(self._m4b_queue)
-        self._m4b_label = (f"[{idx}/{self._m4b_total}] " if self._m4b_total > 1 else "")
         self.prog_bar.setRange(0, 100); self.prog_bar.setValue(0)
         self.prog_bar.setVisible(True)
-        self._m4b_thread = M4bThread(book, out_path, find_ffmpeg())
-        self._m4b_thread.progress.connect(self._on_m4b_progress)
-        self._m4b_thread.finished.connect(self._on_m4b_done)
-        self._m4b_thread.error.connect(self._on_m4b_error)
-        self._m4b_thread.start()
-        self._set_status(f"{self._m4b_label}Building {out_path.name}…")
+        self._pump_m4b()
+
+    @staticmethod
+    def _unique_m4b_path(out_path: Path, taken: set) -> Path:
+        """Return `out_path` if free, else the same name with ' (2)', ' (3)'…
+        appended until it no longer collides with a path in `taken`."""
+        if out_path not in taken:
+            return out_path
+        n = 2
+        while True:
+            cand = out_path.with_name(f"{out_path.stem} ({n}){out_path.suffix}")
+            if cand not in taken:
+                return cand
+            n += 1
+
+    def _pump_m4b(self):
+        """Start queued builds until M4B_MAX_PARALLEL are running. When nothing
+        is left running or waiting, close out the batch."""
+        while self._m4b_queue and len(self._m4b_threads) < M4B_MAX_PARALLEL:
+            book, out_path = self._m4b_queue.pop(0)
+            t = M4bThread(book, out_path, find_ffmpeg())
+            self._m4b_threads[t] = (book, out_path)
+            self._m4b_frac[t]    = 0.0
+            self._m4b_msg[t]     = f"Building {out_path.name}…"
+            t.progress.connect(self._on_m4b_progress)
+            t.finished.connect(self._on_m4b_done)
+            t.error.connect(self._on_m4b_error)
+            t.start()
+        if not self._m4b_threads and not self._m4b_queue:
+            self._finish_m4b_batch()
+            return
+        self._update_m4b_status()
+
+    def _update_m4b_status(self):
+        """Roll the in-flight jobs into one aggregate progress bar + status."""
+        total = max(self._m4b_total, 1)
+        frac  = (self._m4b_done + sum(self._m4b_frac.values())) / total
+        self.prog_bar.setRange(0, 100)
+        self.prog_bar.setValue(min(int(frac * 100), 100))
+        running = len(self._m4b_threads)
+        if self._m4b_total > 1:
+            self._set_status(
+                f"[{self._m4b_done}/{self._m4b_total}] Building M4Bs — "
+                f"{running} running"
+                + (f", {len(self._m4b_queue)} queued" if self._m4b_queue else "")
+                + "…")
+        elif self._m4b_msg:
+            self._set_status(next(iter(self._m4b_msg.values())))
 
     def _on_m4b_progress(self, cur, tot, msg):
-        if tot > 0:
-            self.prog_bar.setRange(0, tot); self.prog_bar.setValue(cur)
-        self._set_status(f"{self._m4b_label}{msg}")
+        t = self.sender()
+        if t in self._m4b_frac and tot > 0:
+            self._m4b_frac[t] = min(cur / tot, 1.0)
+            self._m4b_msg[t]  = msg
+        self._update_m4b_status()
 
     def _on_m4b_done(self, out_path: str):
-        book, _ = self._m4b_current
-        # Tag the new file with the book's metadata + cover
-        try:
-            tg.write_tags(Path(out_path), dict(
-                title=book.title, album=book.title,
-                author=book.author, artist=book.author,
-                narrator=book.narrator, composer=book.narrator,
-                series=book.series, series_num=book.series_num,
-                year=book.year, publisher=book.publisher,
-                genre=book.genre, comment=book.description,
-                description=book.description, cover_art=book.cover_art))
-            note = ''
-        except Exception as e:
-            note = f"  (tagging failed: {e})"
-        log_line(f"[m4b] built {out_path} from {book.file_count} file(s){note}")
-        self._m4b_results.append((True, book.display_name, out_path + note))
-        self._start_next_m4b()
+        t = self.sender()
+        job = self._m4b_threads.get(t)
+        if job is not None:
+            book = job[0]
+            # Tag the new file with the book's metadata + cover
+            try:
+                tg.write_tags(Path(out_path), dict(
+                    title=book.title, album=book.title,
+                    author=book.author, artist=book.author,
+                    narrator=book.narrator, composer=book.narrator,
+                    series=book.series, series_num=book.series_num,
+                    year=book.year, publisher=book.publisher,
+                    genre=book.genre, comment=book.description,
+                    description=book.description, cover_art=book.cover_art))
+                note = ''
+            except Exception as e:
+                note = f"  (tagging failed: {e})"
+            log_line(f"[m4b] built {out_path} from {book.file_count} file(s){note}")
+            self._m4b_results.append((True, book.display_name, out_path + note))
+        self._retire_m4b_thread(t)
 
     def _on_m4b_error(self, msg: str):
-        book, out_path = self._m4b_current
-        log_line(f"[m4b] FAILED {out_path}: {msg}")
-        self._m4b_results.append((False, book.display_name, msg))
-        self._start_next_m4b()   # one failure shouldn't stall the queue
+        t = self.sender()
+        job = self._m4b_threads.get(t)
+        if job is not None:
+            book, out_path = job
+            log_line(f"[m4b] FAILED {out_path}: {msg}")
+            self._m4b_results.append((False, book.display_name, msg))
+        self._retire_m4b_thread(t)   # one failure shouldn't stall the queue
+
+    def _retire_m4b_thread(self, t):
+        """Reap a finished thread, then start the next queued build. Waiting
+        lets run() fully return before we drop the reference — a running
+        QThread that gets garbage-collected crashes Qt."""
+        if t is not None and t in self._m4b_threads:
+            t.wait(5000)
+            self._m4b_threads.pop(t, None)
+            self._m4b_frac.pop(t, None)
+            self._m4b_msg.pop(t, None)
+            self._m4b_done += 1
+        self._pump_m4b()
 
     def _finish_m4b_batch(self):
-        if self._m4b_thread is not None:
-            self._m4b_thread.wait(5000)
-            self._m4b_thread = None
-        self._m4b_current = None
+        for t in list(self._m4b_threads):
+            t.wait(5000)
+        self._m4b_threads.clear()
+        self._m4b_frac.clear()
+        self._m4b_msg.clear()
         self.prog_bar.setVisible(False)
         results, self._m4b_results = self._m4b_results, []
         self._m4b_total = 0
+        self._m4b_done  = 0
         if not results: return
         ok = [r for r in results if r[0]]
         bad = [r for r in results if not r[0]]

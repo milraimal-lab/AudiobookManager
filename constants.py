@@ -1,7 +1,15 @@
 """App-wide constants: version, theme, colors, MIME types, search columns."""
 
+import os as _os
+
 APP_NAME    = "AudioBook Manager"
 APP_VERSION = "2.3.0"
+
+# How many M4B builds may run at once. ffmpeg concat / stream-copy jobs are
+# mostly I/O-bound, so running several together finishes a batch much faster
+# than one-at-a-time. Scale with the machine but leave two cores' worth of
+# headroom for the UI and OS; 2 cores or fewer build serially (one at a time).
+M4B_MAX_PARALLEL = max(1, (_os.cpu_count() or 1) - 2)
 
 STYLE = """
 QMainWindow,QWidget           { background:#1e1e2e; color:#cdd6f4; }
