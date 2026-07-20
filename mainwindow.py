@@ -861,11 +861,13 @@ class MainWindow(QMainWindow):
 
     def _split_files_to_new_book(self, pairs: list):
         """Files tab 'Split selected' — move the chosen rows into a new book."""
-        by_book: dict = {}
+        # Book is an unhashable dataclass (eq=True → __hash__ is None), so
+        # group by its uuid rather than the object itself
+        by_id: dict = {}
         for book, idx in pairs:
-            by_book.setdefault(book, []).append(idx)
+            by_id.setdefault(book.id, (book, []))[1].append(idx)
         created = []
-        for book, indices in by_book.items():
+        for book, indices in by_id.values():
             indices = sorted({i for i in indices if 0 <= i < book.file_count})
             if not indices: continue
             if len(indices) >= book.file_count:
