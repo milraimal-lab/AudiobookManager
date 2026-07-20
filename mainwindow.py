@@ -382,7 +382,7 @@ class MainWindow(QMainWindow):
         if self._dup_thread and self._dup_thread.isRunning():
             self._set_status("Duplicate check already running…"); return
         self._dup_thread = DupCheckThread(books)
-        self._dup_thread.progress.connect(self._set_status)
+        self._dup_thread.progress.connect(lambda m: self._set_status(m, log=False))
         self._dup_thread.finished.connect(self._on_dup_check_done)
         self._dup_thread.start()
         self._set_status("Checking duplicates (size compare, then MD5)…")
@@ -582,7 +582,7 @@ class MainWindow(QMainWindow):
         self._import_scan_thread = None
 
     def _on_import_scan_progress(self, cur, tot, msg):
-        self._set_status(f"[Import] {msg}")
+        self._set_status(f"[Import] {msg}", log=False)
 
     def _on_import_book_ready(self, book: sc.Book):
         if not self._import_group.isVisible():
@@ -720,7 +720,7 @@ class MainWindow(QMainWindow):
 
     def _on_scan_progress(self, cur, tot, msg):
         if tot > 0: self.prog_bar.setRange(0, tot); self.prog_bar.setValue(cur)
-        self._set_status(msg)
+        self._set_status(msg, log=False)
 
     def _on_book_ready(self, book: sc.Book):
         """Called for each book as it is found — adds it to the tree immediately.
@@ -772,7 +772,7 @@ class MainWindow(QMainWindow):
         self._save_books(modified)
 
     def _on_save_progress(self, cur, tot, msg):
-        self.prog_bar.setRange(0, tot); self.prog_bar.setValue(cur); self._set_status(msg)
+        self.prog_bar.setRange(0, tot); self.prog_bar.setValue(cur); self._set_status(msg, log=False)
 
     def _on_save_done(self, books: List[sc.Book]):
         self.prog_bar.setVisible(False)
@@ -1060,9 +1060,9 @@ class MainWindow(QMainWindow):
                 f"[{self._m4b_done}/{self._m4b_total}] Building M4Bs — "
                 f"{running} running"
                 + (f", {len(self._m4b_queue)} queued" if self._m4b_queue else "")
-                + "…")
+                + "…", log=False)
         elif self._m4b_msg:
-            self._set_status(next(iter(self._m4b_msg.values())))
+            self._set_status(next(iter(self._m4b_msg.values())), log=False)
 
     def _on_m4b_progress(self, cur, tot, msg):
         t = self.sender()
@@ -1584,9 +1584,13 @@ class MainWindow(QMainWindow):
         self.prog_bar.setVisible(False); self._set_status(f"Error: {msg}")
         QMessageBox.critical(self, "Error", msg)
 
-    def _set_status(self, msg):
+    def _set_status(self, msg, log=True):
+        # Transient progress ticks (scan/save/organize/M4B) pass log=False so
+        # they don't flood the persistent log — only meaningful one-shot events
+        # are recorded there. The important build events log separately.
         self.status_bar.showMessage(msg)
-        log_line(msg)
+        if log:
+            log_line(msg)
 
     def _open_log(self):
         try:
